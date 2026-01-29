@@ -1,14 +1,5 @@
-let resultContainer = {
-    tables: []
-};
-
-// Sleep function to add delay
-function sleep(ms) {
-    console.log("accountID generating... Please wait...")
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function exportRecord(uuid) {
+async function fetchSingleRecord(uuid) {
+    // Function just to grab raw data
     return new Promise((resolve, reject) => {
         app.NetAgent.sendReq2Lobby(
             "Lobby",
@@ -17,52 +8,61 @@ async function exportRecord(uuid) {
                 game_uuid: uuid,
                 client_version_string: GameMgr.Inst.getClientVersion()
             },
-            async function (i, record) {
-                if (record) {
-                    const csvArray = await extractCsvArray(record); // Await the result from extractCsvArray
-                    resultContainer.tables.push(csvArray); // Push the result to resultContainer.tables
-                    resolve(); // Resolve the promise once the record is processed
-                } else {
-                    reject(new Error('Record is null')); // Handle null records
-                }
-            },
-            function (error) {
-                console.error("Error fetching game record:", error);
-                reject(error); // Reject the promise if there's an error
-            }
+            (i, record) => resolve(record), // Resolve first, process later
+            (err) => reject(err)
         );
     });
 }
 
-async function extractCsvArray(record) {
-    const accountData = [];
+function transformRecordToRows(record) {
+    // return empty to handle possible Error
+    const accounts = record?.head?.accounts;
+    if (!Array.isArray(accounts)) return [];
 
-    // Extract account_id and nickname from the accounts array
-    record.head.accounts.forEach(account => {
-        const account_id = account.account_id || null;
-        const nickname = account.nickname || null;
-
-        accountData.push([account_id, nickname]);
-    });
-
-    return accountData;
+    return accounts.map(acc => [
+        acc.account_id ?? "", 
+        `"${(acc.nickname ?? "").replace(/"/g, '""')}"` // , and ; thingy
+    ]);
 }
 
 async function processRecords(recordUUIDs) {
+    // Use map to save, and accountID is ALWAYS unique.
+    const uniqueAccounts = new Map();
 
-    for (const uuid of recordUUIDs) {
-        await exportRecord(uuid); // Await each record export
-        await sleep(2000); // Add 2-second delay between calls
+    for (const [index, uuid] of recordUUIDs.entries()) {
+        try {
+            console.log(`[${index + 1}/${recordUUIDs.length}] Processing: ${uuid}`);
+            
+            const record = await fetchSingleRecord(uuid);
+            
+            // Check repeat
+            const accounts = record?.head?.accounts || [];
+            accounts.forEach(acc => {
+                if (acc.account_id) {
+                    // Replace old row if account id exists
+                    uniqueAccounts.set(acc.account_id, acc.nickname || "");
+                }
+            });
+
+            // Delay for API Limit
+            if (index < recordUUIDs.length - 1) {
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        } catch (e) {
+            console.error(`Skipping ${uuid} due to error:`, e.message);
+        }
     }
 
-    // After all calls, flatten the resultContainer.tables array
-    const flattenedResults = resultContainer.tables.flat(); // Flatten array of arrays
-
-    // Convert to CSV and trigger download
-    await exportCsv(flattenedResults);
+    // Map to Csv
+    const finalData = Array.from(uniqueAccounts.entries());
+    
+    if (finalData.length > 0) {
+        exportCsv(finalData);
+    } else {
+        console.warn("No valid data found. CSV export aborted.");
+    }
 }
 
-// Function to export CSV in the browser
 function exportCsv(data) {
     const headers = ["account_id", "nickname"];
 
@@ -81,7 +81,7 @@ function exportCsv(data) {
     document.body.removeChild(link);
 }
 
-// Start processing records and output CSV
+// Put the paipu list here, as array
 processRecords(
     [
         "231122-1423c494-e6f6-4c99-9d58-4427d03c0922",
